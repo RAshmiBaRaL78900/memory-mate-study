@@ -36,7 +36,7 @@ serve(async (req) => {
         'X-Title': 'Educational Chatbot',
       },
       body: JSON.stringify({
-        model: 'openai/gpt-4o-mini',
+        model: 'google/gemma-2-9b-it:free',
         messages: [
           { 
             role: 'system', 
