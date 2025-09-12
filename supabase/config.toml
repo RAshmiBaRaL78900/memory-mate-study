@@ -2,6 +2,3 @@ project_id = "zhyhaefbltjzdlqrepbz"
 
 [functions.chat-with-ai]
 verify_jwt = false
-
-[functions.analyze-document]
-verify_jwt = false
