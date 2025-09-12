@@ -3,12 +3,15 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Send, Loader2, Trash2, RefreshCw } from 'lucide-react';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Send, Loader2, Trash2, RefreshCw, FileText } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { ConversationSidebar } from '@/components/ConversationSidebar';
 import { ChatSuggestions } from '@/components/ChatSuggestions';
 import { MessageComponent } from '@/components/MessageComponent';
+import { DocumentUpload } from '@/components/DocumentUpload';
+import { DocumentList } from '@/components/DocumentList';
 
 interface Message {
   id: string;
@@ -23,13 +26,24 @@ interface Conversation {
   updated_at: string;
 }
 
+interface Document {
+  id: string;
+  file_name: string;
+  file_type: string;
+  file_size: number;
+  created_at: string;
+}
+
 export const ChatBot = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [documents, setDocuments] = useState<Document[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadingConversations, setLoadingConversations] = useState(true);
+  const [loadingDocuments, setLoadingDocuments] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
@@ -38,12 +52,14 @@ export const ChatBot = () => {
     loadConversations();
   }, []);
 
-  // Load messages when conversation changes
+  // Load documents when conversation changes
   useEffect(() => {
     if (currentConversationId) {
       loadMessages(currentConversationId);
+      loadDocuments(currentConversationId);
     } else {
       setMessages([]);
+      setDocuments([]);
     }
   }, [currentConversationId]);
 
@@ -109,6 +125,29 @@ export const ChatBot = () => {
         description: "Failed to load messages",
         variant: "destructive",
       });
+    }
+  };
+
+  const loadDocuments = async (conversationId: string) => {
+    setLoadingDocuments(true);
+    try {
+      const { data, error } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('conversation_id', conversationId)
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+      setDocuments(data || []);
+    } catch (error) {
+      console.error('Error loading documents:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load documents",
+        variant: "destructive",
+      });
+    } finally {
+      setLoadingDocuments(false);
     }
   };
 
@@ -191,6 +230,9 @@ export const ChatBot = () => {
       if (!conversationId) return;
     }
 
+    // Determine if this is a document-specific question
+    const isDocumentQuestion = selectedDocumentId !== null;
+    
     // Save user message
     const savedUserMessage = await saveMessage(conversationId, messageToSend, 'user');
     if (!savedUserMessage) return;
@@ -208,23 +250,49 @@ export const ChatBot = () => {
     }
 
     try {
-      const { data, error } = await supabase.functions.invoke('chat-with-ai', {
-        body: { 
-          message: messageToSend,
-          conversationId: conversationId
-        }
-      });
+      let response;
+      
+      if (isDocumentQuestion && selectedDocumentId) {
+        // Use document analysis function
+        response = await supabase.functions.invoke('analyze-document', {
+          body: { 
+            documentId: selectedDocumentId,
+            question: messageToSend,
+            conversationId: conversationId
+          }
+        });
+      } else {
+        // Use regular chat function
+        response = await supabase.functions.invoke('chat-with-ai', {
+          body: { 
+            message: messageToSend,
+            conversationId: conversationId
+          }
+        });
+      }
+
+      const { data, error } = response;
 
       if (error) {
-        console.error('Error calling chat function:', error);
+        console.error('Error calling function:', error);
         throw error;
       }
 
       // Save assistant message
-      const savedAssistantMessage = await saveMessage(conversationId, data.message, 'assistant');
+      const assistantContent = isDocumentQuestion 
+        ? `📄 **${data.documentName}**\n\n${data.message}`
+        : data.message;
+        
+      const savedAssistantMessage = await saveMessage(conversationId, assistantContent, 'assistant');
       if (savedAssistantMessage) {
         setMessages(prev => [...prev, { ...savedAssistantMessage, role: savedAssistantMessage.role as 'user' | 'assistant' }]);
       }
+      
+      // Reset document selection after question
+      if (isDocumentQuestion) {
+        setSelectedDocumentId(null);
+      }
+      
     } catch (error) {
       console.error('Error:', error);
       const errorMessage = {
@@ -287,6 +355,42 @@ export const ChatBot = () => {
         variant: "destructive",
       });
     }
+  };
+
+  const handleAskAboutDocument = (documentId: string, documentName: string) => {
+    setSelectedDocumentId(documentId);
+    setInput(`Analyze the document "${documentName}" and tell me about its main content.`);
+  };
+
+  const handleDeleteDocument = async (documentId: string) => {
+    try {
+      // Delete from database
+      const { error } = await supabase
+        .from('documents')
+        .delete()
+        .eq('id', documentId);
+      
+      if (error) throw error;
+      
+      // Update local state
+      setDocuments(documents.filter(doc => doc.id !== documentId));
+      
+      toast({
+        title: "Success",
+        description: "Document deleted",
+      });
+    } catch (error) {
+      console.error('Error deleting document:', error);
+      toast({
+        title: "Error",
+        description: "Failed to delete document",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleDocumentUploaded = (document: Document) => {
+    setDocuments([document, ...documents]);
   };
 
   const handleClearChat = async () => {
@@ -382,9 +486,24 @@ export const ChatBot = () => {
                         <Send className="w-8 h-8 text-primary" />
                       </div>
                       <h2 className="text-2xl font-semibold mb-2">Let's start learning!</h2>
-                      <p className="text-muted-foreground mb-6">Choose a topic below or ask me anything</p>
+                      <p className="text-muted-foreground mb-6">Choose a topic below, upload a document, or ask me anything</p>
                     </div>
-                    <ChatSuggestions onSelectSuggestion={handleSendMessage} />
+                    
+                    <Tabs defaultValue="suggestions" className="w-full">
+                      <TabsList className="grid w-full grid-cols-2">
+                        <TabsTrigger value="suggestions">Chat Suggestions</TabsTrigger>
+                        <TabsTrigger value="upload">Upload Document</TabsTrigger>
+                      </TabsList>
+                      <TabsContent value="suggestions" className="space-y-4">
+                        <ChatSuggestions onSelectSuggestion={handleSendMessage} />
+                      </TabsContent>
+                      <TabsContent value="upload" className="space-y-4">
+                        <DocumentUpload 
+                          conversationId={currentConversationId}
+                          onDocumentUploaded={handleDocumentUploaded}
+                        />
+                      </TabsContent>
+                    </Tabs>
                   </div>
                 )}
               </div>
@@ -407,7 +526,9 @@ export const ChatBot = () => {
                       <div className="bg-muted rounded-lg p-3">
                         <div className="flex items-center space-x-2">
                           <Loader2 className="w-4 h-4 animate-spin" />
-                          <span className="text-sm">Thinking...</span>
+                          <span className="text-sm">
+                            {selectedDocumentId ? 'Analyzing document...' : 'Thinking...'}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -417,30 +538,64 @@ export const ChatBot = () => {
             )}
           </ScrollArea>
           
-          {/* Input Area */}
+          {/* Document Panel & Input Area */}
           {currentConversationId && (
-            <div className="p-4 border-t">
-              <div className="flex space-x-2">
-                <Input
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="Ask me anything..."
-                  onKeyPress={handleKeyPress}
-                  disabled={loading}
-                  className="flex-1"
-                />
-                <Button 
-                  onClick={() => handleSendMessage()}
-                  disabled={loading || !input.trim()}
-                >
-                  {loading ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Send className="w-4 h-4" />
-                  )}
-                </Button>
+            <>
+              {/* Document Panel */}
+              {documents.length > 0 && (
+                <div className="px-4 border-t">
+                  <div className="py-3">
+                    <DocumentList
+                      documents={documents}
+                      onAskQuestion={handleAskAboutDocument}
+                      onDeleteDocument={handleDeleteDocument}
+                      loading={loadingDocuments}
+                    />
+                  </div>
+                </div>
+              )}
+              
+              {/* Input Area */}
+              <div className="p-4 border-t">
+                {selectedDocumentId && (
+                  <div className="mb-3 p-2 bg-primary/10 rounded-lg flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <FileText className="w-4 h-4 text-primary" />
+                      <span className="text-sm font-medium">
+                        Asking about: {documents.find(d => d.id === selectedDocumentId)?.file_name}
+                      </span>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setSelectedDocumentId(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                )}
+                <div className="flex space-x-2">
+                  <Input
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder={selectedDocumentId ? "Ask about the document..." : "Ask me anything..."}
+                    onKeyPress={handleKeyPress}
+                    disabled={loading}
+                    className="flex-1"
+                  />
+                  <Button 
+                    onClick={() => handleSendMessage()}
+                    disabled={loading || !input.trim()}
+                  >
+                    {loading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Send className="w-4 h-4" />
+                    )}
+                  </Button>
+                </div>
               </div>
-            </div>
+            </>
           )}
         </Card>
       </div>
